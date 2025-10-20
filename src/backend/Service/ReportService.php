@@ -169,16 +169,25 @@ class ReportService
             }
 
             $dom = new DOMDocument();
-            libxml_use_internal_errors(true);
-            $dom->loadHTML($content);
+            $previousLibxmlState = libxml_use_internal_errors(true);
+
+            $loaded = $dom->loadXML($content, LIBXML_NOERROR | LIBXML_NOWARNING);
+            if (!$loaded) {
+                $loaded = $dom->loadHTML($content, LIBXML_NOERROR | LIBXML_NOWARNING);
+            }
+
             libxml_clear_errors();
+            libxml_use_internal_errors($previousLibxmlState);
+
+            if (!$loaded) {
+                continue;
+            }
 
             $xpath = new DOMXPath($dom);
-            $xpath->registerNamespace('ix', 'http://www.xbrl.org/2013/inlineXBRL');
-            $xpath->registerNamespace('link', 'http://www.xbrl.org/2003/linkbase');
-            $xpath->registerNamespace('xbrli', 'http://www.xbrl.org/2003/instance');
+            $factsQuery = '//*[translate(local-name(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz") = "nonfraction"'
+                . ' or translate(local-name(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz") = "nonnumeric"]';
 
-            foreach ($xpath->query('//ix:nonFraction|//ix:nonNumeric') as $fact) {
+            foreach ($xpath->query($factsQuery) as $fact) {
                 if (!$fact instanceof \DOMElement) {
                     continue;
                 }
@@ -188,18 +197,20 @@ class ReportService
                     continue;
                 }
 
+                $valueText = trim($fact->textContent ?? '');
+                if ($valueText === '') {
+                    continue;
+                }
+
                 $unit = $fact->getAttribute('unitRef') ?: 'IDR';
-                $value = $fact->nodeValue;
-                if ($fact->hasAttribute('decimals') && is_numeric($value)) {
-                    $decimals = (int) $fact->getAttribute('decimals');
-                    if ($decimals >= 0) {
-                        $value = round((float) $value, $decimals);
-                    }
+                $numericValue = $this->parseNumericValue($valueText, $fact->getAttribute('decimals') ?: null);
+                if ($numericValue === null) {
+                    continue;
                 }
 
                 $facts[] = [
                     'line_item' => $label,
-                    'value' => (float) $value,
+                    'value' => $numericValue,
                     'unit' => $unit,
                 ];
             }
@@ -212,5 +223,33 @@ class ReportService
         }
 
         return $facts;
+    }
+
+    private function parseNumericValue(string $value, ?string $decimalsAttribute): ?float
+    {
+        $isNegative = str_contains($value, '(') && str_contains($value, ')');
+        $normalized = str_replace([",", "\xC2\xA0", " ", "(", ")"], '', $value);
+        if (substr_count($normalized, '.') > 1) {
+            $normalized = str_replace('.', '', $normalized);
+        }
+        $normalized = preg_replace('/[^0-9\-\.]/', '', $normalized ?? '');
+        if ($normalized === null || $normalized === '' || !is_numeric($normalized)) {
+            return null;
+        }
+
+        if ($isNegative && $normalized[0] !== '-') {
+            $normalized = '-' . $normalized;
+        }
+
+        $number = (float) $normalized;
+
+        if ($decimalsAttribute !== null && $decimalsAttribute !== '') {
+            $decimals = (int) $decimalsAttribute;
+            if ($decimals >= 0) {
+                $number = round($number, $decimals);
+            }
+        }
+
+        return $number;
     }
 }
