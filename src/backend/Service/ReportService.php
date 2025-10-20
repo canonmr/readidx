@@ -159,49 +159,48 @@ class ReportService
 
         for ($i = 0; $i < $zip->numFiles; $i++) {
             $name = $zip->getNameIndex($i);
-            if (!preg_match('/\.(xhtml|html)$/i', (string) $name)) {
+            if ($name === false) {
+                continue;
+            }
+
+            $extension = strtolower((string) pathinfo((string) $name, PATHINFO_EXTENSION));
+            if (!in_array($extension, ['html', 'xhtml', 'xbrl', 'xml'], true)) {
                 continue;
             }
 
             $content = $zip->getFromIndex($i);
-            if ($content === false) {
+            if ($content === false || trim($content) === '') {
                 continue;
             }
 
             $dom = new DOMDocument();
-            libxml_use_internal_errors(true);
-            $dom->loadHTML($content);
+            $previousLibxmlState = libxml_use_internal_errors(true);
+
+            $loaded = false;
+            if ($extension === 'html' || $extension === 'xhtml') {
+                $loaded = $dom->loadXML($content, LIBXML_NOERROR | LIBXML_NOWARNING);
+                if (!$loaded) {
+                    $loaded = $dom->loadHTML($content, LIBXML_NOERROR | LIBXML_NOWARNING);
+                }
+            } else {
+                $loaded = $dom->loadXML($content, LIBXML_NOERROR | LIBXML_NOWARNING);
+            }
+
             libxml_clear_errors();
+            libxml_use_internal_errors($previousLibxmlState);
 
-            $xpath = new DOMXPath($dom);
-            $xpath->registerNamespace('ix', 'http://www.xbrl.org/2013/inlineXBRL');
-            $xpath->registerNamespace('link', 'http://www.xbrl.org/2003/linkbase');
-            $xpath->registerNamespace('xbrli', 'http://www.xbrl.org/2003/instance');
+            if (!$loaded) {
+                continue;
+            }
 
-            foreach ($xpath->query('//ix:nonFraction|//ix:nonNumeric') as $fact) {
-                if (!$fact instanceof \DOMElement) {
-                    continue;
+            if ($extension === 'html' || $extension === 'xhtml') {
+                foreach ($this->extractInlineFacts($dom) as $factLine) {
+                    $facts[] = $factLine;
                 }
-
-                $label = trim($fact->getAttribute('name'));
-                if ($label === '') {
-                    continue;
+            } else {
+                foreach ($this->extractInstanceFacts($dom) as $factLine) {
+                    $facts[] = $factLine;
                 }
-
-                $unit = $fact->getAttribute('unitRef') ?: 'IDR';
-                $value = $fact->nodeValue;
-                if ($fact->hasAttribute('decimals') && is_numeric($value)) {
-                    $decimals = (int) $fact->getAttribute('decimals');
-                    if ($decimals >= 0) {
-                        $value = round((float) $value, $decimals);
-                    }
-                }
-
-                $facts[] = [
-                    'line_item' => $label,
-                    'value' => (float) $value,
-                    'unit' => $unit,
-                ];
             }
         }
 
@@ -212,5 +211,147 @@ class ReportService
         }
 
         return $facts;
+    }
+
+    /**
+     * @return array<int, array{line_item:string,value:float,unit:string}>
+     */
+    private function extractInlineFacts(DOMDocument $dom): array
+    {
+        $facts = [];
+        $xpath = new DOMXPath($dom);
+        $factsQuery = '//*[translate(local-name(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz") = "nonfraction"'
+            . ' or translate(local-name(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz") = "nonnumeric"]';
+
+        foreach ($xpath->query($factsQuery) as $fact) {
+            if (!$fact instanceof \DOMElement) {
+                continue;
+            }
+
+            $label = trim($fact->getAttribute('name'));
+            if ($label === '') {
+                continue;
+            }
+
+            $valueText = trim($fact->textContent ?? '');
+            if ($valueText === '') {
+                continue;
+            }
+
+            $unit = $fact->getAttribute('unitRef') ?: 'IDR';
+            $numericValue = $this->parseNumericValue($valueText, $fact->getAttribute('decimals') ?: null);
+            if ($numericValue === null) {
+                continue;
+            }
+
+            $facts[] = [
+                'line_item' => $label,
+                'value' => $numericValue,
+                'unit' => $unit,
+            ];
+        }
+
+        return $facts;
+    }
+
+    /**
+     * @return array<int, array{line_item:string,value:float,unit:string}>
+     */
+    private function extractInstanceFacts(DOMDocument $dom): array
+    {
+        $facts = [];
+        $xpath = new DOMXPath($dom);
+        $xpath->registerNamespace('xbrli', 'http://www.xbrl.org/2003/instance');
+        $xpath->registerNamespace('link', 'http://www.xbrl.org/2003/linkbase');
+
+        $query = '/*/*[namespace-uri() != "http://www.xbrl.org/2003/instance" and namespace-uri() != "http://www.xbrl.org/2003/linkbase"]';
+
+        foreach ($xpath->query($query) as $fact) {
+            if (!$fact instanceof \DOMElement) {
+                continue;
+            }
+
+            $nilAttribute = $fact->getAttributeNS('http://www.w3.org/2001/XMLSchema-instance', 'nil');
+            if ($nilAttribute !== '' && strtolower($nilAttribute) === 'true') {
+                continue;
+            }
+
+            $label = trim($fact->localName ?? '');
+            if ($label === '') {
+                continue;
+            }
+
+            $valueText = trim($fact->textContent ?? '');
+            if ($valueText === '') {
+                continue;
+            }
+
+            $numericValue = $this->parseNumericValue($valueText, $fact->getAttribute('decimals') ?: null);
+            if ($numericValue === null) {
+                continue;
+            }
+
+            $unit = $fact->getAttribute('unitRef') ?: 'IDR';
+
+            $facts[] = [
+                'line_item' => $label,
+                'value' => $numericValue,
+                'unit' => $unit,
+            ];
+        }
+
+        return $facts;
+    }
+
+    private function parseNumericValue(string $value, ?string $decimalsAttribute): ?float
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        $isNegative = str_contains($trimmed, '(') && str_contains($trimmed, ')');
+        $normalized = str_replace(["\xC2\xA0", " " ], '', $trimmed);
+
+        $hasComma = str_contains($normalized, ',');
+        $hasDot = str_contains($normalized, '.');
+
+        if ($hasComma && !$hasDot) {
+            $normalized = str_replace('.', '', $normalized);
+            $normalized = str_replace(',', '.', $normalized);
+        } elseif ($hasComma && $hasDot) {
+            if (strrpos($normalized, ',') > strrpos($normalized, '.')) {
+                $normalized = str_replace('.', '', $normalized);
+                $normalized = str_replace(',', '.', $normalized);
+            } else {
+                $normalized = str_replace(',', '', $normalized);
+            }
+        }
+
+        $normalized = str_replace(['(', ')'], '', $normalized);
+
+        if (substr_count($normalized, '.') > 1) {
+            $normalized = str_replace('.', '', $normalized);
+        }
+
+        $normalized = preg_replace('/[^0-9\-\.]/', '', $normalized ?? '');
+        if ($normalized === null || $normalized === '' || !is_numeric($normalized)) {
+            return null;
+        }
+
+        if ($isNegative && $normalized[0] !== '-') {
+            $normalized = '-' . $normalized;
+        }
+
+        $number = (float) $normalized;
+
+        if ($decimalsAttribute !== null && $decimalsAttribute !== '' && is_numeric($decimalsAttribute)) {
+            $decimals = (int) $decimalsAttribute;
+            if ($decimals >= 0) {
+                $number = round($number, $decimals);
+            }
+        }
+
+        return $number;
     }
 }
