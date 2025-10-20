@@ -1,11 +1,11 @@
 # ReadIDX
 
-Aplikasi sederhana untuk menampilkan laporan keuangan emiten Bursa Efek Indonesia berdasarkan kode saham, tahun, dan kuartal. Backend ditulis dengan PHP menggunakan PDO, sedangkan frontend memakai HTML, CSS, dan JavaScript tanpa framework.
+Aplikasi sederhana untuk menampilkan dan mengelola laporan keuangan emiten Bursa Efek Indonesia berdasarkan kode saham, tahun, dan kuartal. Backend ditulis dengan PHP menggunakan PDO, sedangkan frontend memakai HTML, CSS, dan JavaScript tanpa framework.
 
 ## Struktur Proyek
 
 ```
-public/              # Frontend statis dan endpoint API
+public/              # Frontend statis dan endpoint API (pencarian, daftar, unggah)
 src/backend/         # Kode backend (repository, service, koneksi DB)
 db/migrations/       # Skrip SQL untuk membuat skema database
 tools/               # Skrip CLI untuk ETL dari arsip XBRL
@@ -43,7 +43,13 @@ Skrip akan:
 - Memasukkan fakta keuangan dari tag `ix:nonFraction` atau `ix:nonNumeric` ke tabel `financial_lines`.
 
 ## API
-Endpoint utama berada di `public/api/report.php` dan menerima parameter `ticker`, `year`, `quarter` (POST JSON ataupun query string). Respons sukses:
+Endpoint yang tersedia:
+
+- `public/api/report.php` – menerima parameter `ticker`, `year`, `quarter` (POST JSON ataupun query string) untuk menampilkan isi laporan.
+- `public/api/reports.php` – mengembalikan daftar laporan yang tersimpan lengkap dengan metadata jumlah baris dan berkas sumber.
+- `public/api/upload.php` – menerima form-data (`company_name`, `ticker`, `year`, `quarter`, `report_file`) untuk menyimpan arsip Inline XBRL dan memproses faktanya.
+
+Contoh respons sukses `report.php`:
 
 ```json
 {
@@ -62,8 +68,10 @@ Endpoint utama berada di `public/api/report.php` dan menerima parameter `ticker`
 Jika parameter tidak valid atau data tidak ditemukan, endpoint akan mengembalikan status 422 dengan pesan error yang jelas.
 
 ## Pengembangan Frontend
-- Formulir menerima input kode saham, tahun, dan kuartal.
+- Formulir pencarian menerima input kode saham, tahun, dan kuartal.
 - Setelah submit, JavaScript (`public/assets/app.js`) memanggil API dan menampilkan hasil dalam tabel responsif.
+- Halaman utama juga memuat daftar laporan yang sudah tersimpan serta formulir unggah arsip ZIP Inline XBRL.
+- Klik tombol "Lihat" pada daftar akan mengisi formulir pencarian secara otomatis.
 - `public/assets/styles.css` menyediakan gaya minimalis dan responsif.
 
 ## Lisensi

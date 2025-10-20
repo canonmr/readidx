@@ -55,9 +55,30 @@ body {
     border: 1px solid rgba(15, 23, 42, 0.06);
 }
 
+.card--full {
+    grid-column: 1 / -1;
+}
+
+.card-subtitle {
+    margin-top: 0.25rem;
+    margin-bottom: 1.25rem;
+    color: var(--muted);
+}
+
 .form {
     display: grid;
     gap: 1rem;
+}
+
+.form-grid {
+    display: grid;
+    gap: 1rem;
+}
+
+@media (min-width: 520px) {
+    .form-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 
 label {
@@ -104,6 +125,14 @@ button:hover {
     color: var(--muted);
 }
 
+.status.error {
+    color: #b91c1c;
+}
+
+.status.success {
+    color: #047857;
+}
+
 .report.hidden {
     display: none;
 }
@@ -136,6 +165,50 @@ button:hover {
 #report-table td.numeric {
     text-align: right;
     font-variant-numeric: tabular-nums;
+}
+
+.table-wrapper {
+    overflow-x: auto;
+}
+
+#reports-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 640px;
+}
+
+#reports-table thead {
+    background: rgba(0, 89, 178, 0.08);
+}
+
+#reports-table th,
+#reports-table td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+}
+
+#reports-table tbody tr:hover {
+    background-color: rgba(0, 89, 178, 0.06);
+}
+
+#reports-table td.numeric {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.link-button {
+    background: none;
+    border: none;
+    color: var(--primary);
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+}
+
+.link-button:hover {
+    text-decoration: underline;
 }
 
 .footer {
