@@ -2,8 +2,11 @@
 
 namespace Readidx\Backend\Service;
 
+use DOMDocument;
+use DOMXPath;
 use InvalidArgumentException;
 use Readidx\Backend\Repository\ReportRepository;
+use RuntimeException;
 
 class ReportService
 {
@@ -15,6 +18,74 @@ class ReportService
     }
 
     public function getReport(string $ticker, string $year, string $quarter): array
+    {
+        [$ticker, $yearInt, $quarterInt] = $this->validateTickerPeriod($ticker, $year, $quarter);
+
+        $report = $this->repository->findByTickerYearQuarter($ticker, $yearInt, $quarterInt);
+        if (!$report) {
+            throw new InvalidArgumentException('Data laporan tidak ditemukan untuk parameter yang diberikan.');
+        }
+
+        return $report;
+    }
+
+    public function listReports(): array
+    {
+        return $this->repository->listReports();
+    }
+
+    public function importReport(
+        string $ticker,
+        string $companyName,
+        string $year,
+        string $quarter,
+        string $sourcePath,
+        ?string $originalFilename = null
+    ): array {
+        [$ticker, $yearInt, $quarterInt] = $this->validateTickerPeriod($ticker, $year, $quarter);
+
+        $companyName = trim($companyName);
+        if ($companyName === '') {
+            throw new InvalidArgumentException('Nama perusahaan wajib diisi.');
+        }
+
+        if (!is_file($sourcePath)) {
+            throw new InvalidArgumentException('Berkas unggahan tidak ditemukan.');
+        }
+
+        $storedFilePath = $this->storeZipArchive($ticker, $yearInt, $quarterInt, $sourcePath, $originalFilename);
+
+        try {
+            $facts = $this->parseFactsFromInlineXbrl($storedFilePath);
+        } catch (\Throwable $exception) {
+            @unlink($storedFilePath);
+            throw $exception;
+        }
+
+        $lineCount = count($facts);
+
+        $this->repository->transaction(function () use ($ticker, $companyName, $yearInt, $quarterInt, $storedFilePath, $facts): void {
+            $companyId = $this->repository->upsertCompany($ticker, $companyName);
+            $reportId = $this->repository->createOrUpdateReport($companyId, $yearInt, $quarterInt, basename($storedFilePath));
+            $this->repository->replaceReportLines($reportId, $facts);
+        });
+
+        return [
+            'company' => [
+                'ticker' => $ticker,
+                'name' => $companyName,
+            ],
+            'fiscal_year' => $yearInt,
+            'fiscal_quarter' => $quarterInt,
+            'line_count' => $lineCount,
+            'source_file' => basename($storedFilePath),
+        ];
+    }
+
+    /**
+     * @return array{0:string,1:int,2:int}
+     */
+    private function validateTickerPeriod(string $ticker, string $year, string $quarter): array
     {
         $ticker = strtoupper(trim($ticker));
         if ($ticker === '') {
@@ -43,11 +114,103 @@ class ReportService
             throw new InvalidArgumentException('Kuartal harus bernilai 1 sampai 4.');
         }
 
-        $report = $this->repository->findByTickerYearQuarter($ticker, $yearInt, $quarterInt);
-        if (!$report) {
-            throw new InvalidArgumentException('Data laporan tidak ditemukan untuk parameter yang diberikan.');
+        return [$ticker, $yearInt, $quarterInt];
+    }
+
+    private function storeZipArchive(string $ticker, int $year, int $quarter, string $sourcePath, ?string $originalFilename): string
+    {
+        $originalName = $originalFilename ?: basename($sourcePath);
+        $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+        if ($extension !== 'zip') {
+            throw new InvalidArgumentException('Berkas yang diunggah harus berformat ZIP.');
         }
 
-        return $report;
+        $storageDir = dirname(__DIR__, 3) . '/instance_files';
+        if (!is_dir($storageDir) && !mkdir($storageDir, 0775, true) && !is_dir($storageDir)) {
+            throw new RuntimeException('Tidak dapat membuat direktori penyimpanan.');
+        }
+
+        $timestamp = date('Ymd_His');
+        $safeTicker = preg_replace('/[^A-Z0-9]/', '', $ticker) ?: $ticker;
+        $targetName = sprintf('%s_%d_Q%d_%s.zip', $safeTicker, $year, $quarter, $timestamp);
+        $targetPath = $storageDir . '/' . $targetName;
+
+        if (is_uploaded_file($sourcePath)) {
+            if (!move_uploaded_file($sourcePath, $targetPath)) {
+                throw new RuntimeException('Gagal memindahkan berkas unggahan.');
+            }
+        } else {
+            if (!copy($sourcePath, $targetPath)) {
+                throw new RuntimeException('Gagal menyalin berkas sumber.');
+            }
+        }
+
+        return $targetPath;
+    }
+
+    private function parseFactsFromInlineXbrl(string $zipPath): array
+    {
+        $zip = new \ZipArchive();
+        if ($zip->open($zipPath) !== true) {
+            throw new RuntimeException('Tidak dapat membuka arsip ZIP.');
+        }
+
+        $facts = [];
+
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $name = $zip->getNameIndex($i);
+            if (!preg_match('/\.(xhtml|html)$/i', (string) $name)) {
+                continue;
+            }
+
+            $content = $zip->getFromIndex($i);
+            if ($content === false) {
+                continue;
+            }
+
+            $dom = new DOMDocument();
+            libxml_use_internal_errors(true);
+            $dom->loadHTML($content);
+            libxml_clear_errors();
+
+            $xpath = new DOMXPath($dom);
+            $xpath->registerNamespace('ix', 'http://www.xbrl.org/2013/inlineXBRL');
+            $xpath->registerNamespace('link', 'http://www.xbrl.org/2003/linkbase');
+            $xpath->registerNamespace('xbrli', 'http://www.xbrl.org/2003/instance');
+
+            foreach ($xpath->query('//ix:nonFraction|//ix:nonNumeric') as $fact) {
+                if (!$fact instanceof \DOMElement) {
+                    continue;
+                }
+
+                $label = trim($fact->getAttribute('name'));
+                if ($label === '') {
+                    continue;
+                }
+
+                $unit = $fact->getAttribute('unitRef') ?: 'IDR';
+                $value = $fact->nodeValue;
+                if ($fact->hasAttribute('decimals') && is_numeric($value)) {
+                    $decimals = (int) $fact->getAttribute('decimals');
+                    if ($decimals >= 0) {
+                        $value = round((float) $value, $decimals);
+                    }
+                }
+
+                $facts[] = [
+                    'line_item' => $label,
+                    'value' => (float) $value,
+                    'unit' => $unit,
+                ];
+            }
+        }
+
+        $zip->close();
+
+        if ($facts === []) {
+            throw new RuntimeException('Tidak ditemukan fakta keuangan pada arsip yang diunggah.');
+        }
+
+        return $facts;
     }
 }
